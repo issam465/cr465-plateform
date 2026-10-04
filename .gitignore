@@ -1,0 +1,22 @@
+# Secrets : ne JAMAIS commiter
+.env
+*.env
+!.env.example
+secrets/
+*.key
+*.pem
+*.crt
+*.p12
+acme.json
+ 
+# Donnees des conteneurs
+data/
+volumes/
+*.sql
+*.dump
+ 
+# Fichiers temporaires
+*.log
+Thumbs.db
+.vscode/
+.idea/
