@@ -1,0 +1,176 @@
+# =============================================================================
+# CR465 - Socle Docker Compose (phase 2)
+# Services : socket-proxy, Traefik, PostgreSQL, Portainer CE
+# Les services applicatifs (Drupal, Moodle, Keycloak, n8n) seront ajoutés ensuite.
+#
+# Lancement :  cd /opt/platform/repo/compose && docker compose up -d
+# Aucun secret ici : tout vient de .env et de ./secrets/ (non commités).
+# =============================================================================
+name: cr465
+
+# Options de sécurité communes à tous les conteneurs
+x-securite: &securite
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+# -----------------------------------------------------------------------------
+# Réseaux : segmentation en zones de confiance
+# -----------------------------------------------------------------------------
+networks:
+  exposition:          # seul réseau joignable depuis l'extérieur (Traefik uniquement)
+    name: cr465_exposition
+  applicatif:          # Traefik <-> services web ; aucun accès Internet
+    name: cr465_applicatif
+    internal: true
+  donnees:             # services applicatifs <-> PostgreSQL ; jamais exposé
+    name: cr465_donnees
+    internal: true
+  socket:              # Traefik <-> socket-proxy uniquement
+    name: cr465_socket
+    internal: true
+
+volumes:
+  postgres_data:
+  portainer_data:
+
+secrets:
+  portainer_admin_password:
+    file: ./secrets/portainer_admin_password
+  traefik_dashboard_htpasswd:
+    file: ./secrets/traefik_dashboard.htpasswd
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # socket-proxy : filtre l'API Docker pour Traefik (lecture des conteneurs seulement)
+  # Évite de monter /var/run/docker.sock dans Traefik, exposé au trafic web.
+  # ---------------------------------------------------------------------------
+  socket-proxy:
+    <<: *securite
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    environment:
+      CONTAINERS: 1      # lecture de la liste des conteneurs (nécessaire à Traefik)
+      POST: 0            # aucune écriture : impossible de créer ou modifier un conteneur
+      LOG_LEVEL: warning
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - socket
+    deploy:
+      resources:
+        limits: { cpus: "0.25", memory: 64M }
+
+  # ---------------------------------------------------------------------------
+  # Traefik : unique point d'entrée HTTP/HTTPS
+  # ---------------------------------------------------------------------------
+  traefik:
+    <<: *securite
+    image: traefik:v3.7.13
+    user: "1000:1000"            # non-root (cr465admin) : ports internes > 1024
+    read_only: true
+    tmpfs:
+      - /tmp
+    depends_on:
+      - socket-proxy
+    ports:
+      - "80:8000"                # HTTP  -> redirigé vers HTTPS
+      - "443:8443"               # HTTPS
+    volumes:
+      - ./traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./traefik/dynamic:/etc/traefik/dynamic:ro
+      - ./traefik/certs:/etc/traefik/certs:ro
+    secrets:
+      - traefik_dashboard_htpasswd
+    networks:
+      - exposition
+      - applicatif
+      - socket
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+    labels:
+      - traefik.enable=true
+      # Tableau de bord Traefik : HTTPS + liste d'IP autorisées + mot de passe
+      - traefik.http.routers.dashboard.rule=Host(`traefik.${DOMAIN}`)
+      - traefik.http.routers.dashboard.entrypoints=websecure
+      - traefik.http.routers.dashboard.tls=true
+      - traefik.http.routers.dashboard.service=api@internal
+      - traefik.http.routers.dashboard.middlewares=admin-allowlist,dashboard-auth,secure-headers
+      # Middlewares réutilisables par tous les services
+      - traefik.http.middlewares.admin-allowlist.ipallowlist.sourcerange=${ADMIN_ALLOWLIST}
+      - traefik.http.middlewares.dashboard-auth.basicauth.usersfile=/run/secrets/traefik_dashboard_htpasswd
+      - traefik.http.middlewares.secure-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.secure-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.secure-headers.headers.frameDeny=true
+      - traefik.http.middlewares.secure-headers.headers.referrerPolicy=strict-origin-when-cross-origin
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL : base unique, une base + un utilisateur par service
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *securite
+    image: postgres:17.10-alpine
+    # L'entrypoint démarre en root puis bascule vers l'utilisateur "postgres" :
+    # on ne rend que les capacités strictement nécessaires à cette bascule.
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    shm_size: 128m
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      DRUPAL_DB_PASSWORD: ${DRUPAL_DB_PASSWORD}
+      MOODLE_DB_PASSWORD: ${MOODLE_DB_PASSWORD}
+      KEYCLOAK_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      N8N_DB_PASSWORD: ${N8N_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - donnees
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+
+  # ---------------------------------------------------------------------------
+  # Portainer CE : visualisation et exploitation des conteneurs
+  # Accès via Traefik uniquement, restreint aux IP d'administration.
+  # ---------------------------------------------------------------------------
+  portainer:
+    <<: *securite
+    image: portainer/portainer-ce:2.39.5
+    command: >
+      -H unix:///var/run/docker.sock
+      --admin-password-file /run/secrets/portainer_admin_password
+    volumes:
+      # Risque assumé : Portainer a besoin de l'API Docker complète pour gérer
+      # les conteneurs. Compensé par l'accès restreint (IP + mot de passe).
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    secrets:
+      - portainer_admin_password
+    networks:
+      - applicatif
+    deploy:
+      resources:
+        limits: { cpus: "0.5", memory: 256M }
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)
+      - traefik.http.routers.portainer.entrypoints=websecure
+      - traefik.http.routers.portainer.tls=true
+      - traefik.http.routers.portainer.middlewares=admin-allowlist@docker,secure-headers@docker
+      - traefik.http.services.portainer.loadbalancer.server.port=9000

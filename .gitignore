@@ -20,3 +20,12 @@ volumes/
 Thumbs.db
 .vscode/
 .idea/
+
+# Fichiers generes et cles SSH
+
+*.iso
+
+id_*
+
+!*.pub
+ 

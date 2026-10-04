@@ -1,0 +1,8 @@
+# Fins de ligne Linux (LF) dans le dépôt, même si les fichiers sont édités sous Windows.
+# Sans cela, les scripts .sh échouent sur la VM ("bad interpreter" / "\r: command not found").
+* text=auto eol=lf
+*.sh text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.iso binary
+*.png binary

@@ -1,0 +1,10 @@
+# Certificat local (généré par scripts/gen-certs.sh) et version TLS minimale
+tls:
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /etc/traefik/certs/cr465.test.crt
+        keyFile: /etc/traefik/certs/cr465.test.key
+  options:
+    default:
+      minVersion: VersionTLS12

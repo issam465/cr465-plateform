@@ -1,0 +1,48 @@
+# Configuration statique de Traefik (CR465)
+
+global:
+  checkNewVersion: false
+  sendAnonymousUsage: false
+
+log:
+  level: INFO
+  format: json
+
+# Journal des accès en JSON (exploitable plus tard par Loki).
+# Les en-têtes ne sont pas journalisés pour ne pas enregistrer de jetons ou mots de passe.
+accessLog:
+  format: json
+  fields:
+    headers:
+      defaultMode: drop
+
+api:
+  dashboard: true    # exposé uniquement via un routeur protégé (voir docker-compose.yml)
+
+ping:
+  entryPoint: ping   # utilisé par le healthcheck, jamais publié
+
+entryPoints:
+  web:
+    address: ":8000"
+    http:
+      redirections:
+        entryPoint:
+          to: ":443"       # port public HTTPS
+          scheme: https
+          permanent: true
+  websecure:
+    address: ":8443"
+    http:
+      tls: {}
+  ping:
+    address: ":8082"
+
+providers:
+  docker:
+    endpoint: "tcp://socket-proxy:2375"   # via le proxy filtrant, pas le socket brut
+    exposedByDefault: false               # un service n'est publié que s'il le demande
+    network: cr465_applicatif
+  file:
+    directory: /etc/traefik/dynamic
+    watch: true
