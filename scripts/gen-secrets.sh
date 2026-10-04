@@ -10,19 +10,24 @@ COMPOSE="$(cd "$(dirname "$0")/.." && pwd)/compose"
 rand() { openssl rand -hex 20; }
 
 # 1. Fichier .env
-if [ -f "$COMPOSE/.env" ]; then
-  echo ".env existe deja : conserve (supprimez-le pour le regenerer)"
-else
-  while IFS= read -r line; do
-    if [[ "$line" == *=changeme ]]; then
-      echo "${line%=changeme}=$(rand)"
-    else
-      echo "$line"
-    fi
-  done < "$COMPOSE/.env.example" > "$COMPOSE/.env"
-  chmod 600 "$COMPOSE/.env"
-  echo ".env cree avec des mots de passe aleatoires"
-fi
+#    Création au premier lancement ; ensuite, seules les NOUVELLES variables de
+#    .env.example sont ajoutées (les mots de passe existants ne changent jamais).
+touch "$COMPOSE/.env"
+chmod 600 "$COMPOSE/.env"
+ajouts=0
+while IFS= read -r line; do
+  [[ "$line" =~ ^([A-Z0-9_]+)= ]] || continue
+  key="${BASH_REMATCH[1]}"
+  grep -q "^${key}=" "$COMPOSE/.env" && continue
+  if [[ "$line" == *=changeme ]]; then
+    echo "${key}=$(rand)" >> "$COMPOSE/.env"
+  else
+    echo "$line" >> "$COMPOSE/.env"
+  fi
+  echo "  + ${key} ajoute a .env"
+  ajouts=$((ajouts + 1))
+done < "$COMPOSE/.env.example"
+echo ".env a jour (${ajouts} variable(s) ajoutee(s))"
 
 # 2. Secrets des interfaces d'administration
 mkdir -p "$COMPOSE/secrets"

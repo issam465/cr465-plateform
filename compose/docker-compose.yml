@@ -85,9 +85,16 @@ services:
     secrets:
       - traefik_dashboard_htpasswd
     networks:
-      - exposition
-      - applicatif
-      - socket
+      exposition: {}
+      applicatif:
+        # Les conteneurs résolvent les URL publiques vers Traefik : Moodle peut ainsi
+        # joindre https://auth.cr465.test sans sortir du réseau interne.
+        aliases:
+          - auth.${DOMAIN}
+          - moodle.${DOMAIN}
+          - shop.${DOMAIN}
+          - n8n.${DOMAIN}
+      socket: {}
     healthcheck:
       test: ["CMD", "traefik", "healthcheck", "--ping"]
       interval: 30s
@@ -112,6 +119,9 @@ services:
       - traefik.http.middlewares.secure-headers.headers.contentTypeNosniff=true
       - traefik.http.middlewares.secure-headers.headers.frameDeny=true
       - traefik.http.middlewares.secure-headers.headers.referrerPolicy=strict-origin-when-cross-origin
+      # Variante sans frameDeny pour les applis qui utilisent leurs propres iframes (Keycloak)
+      - traefik.http.middlewares.hsts.headers.stsSeconds=31536000
+      - traefik.http.middlewares.hsts.headers.contentTypeNosniff=true
 
   # ---------------------------------------------------------------------------
   # PostgreSQL : base unique, une base + un utilisateur par service
@@ -174,3 +184,56 @@ services:
       - traefik.http.routers.portainer.tls=true
       - traefik.http.routers.portainer.middlewares=admin-allowlist@docker,secure-headers@docker
       - traefik.http.services.portainer.loadbalancer.server.port=9000
+
+  # ---------------------------------------------------------------------------
+  # Keycloak : fournisseur d'identité et SSO (OIDC)
+  # TLS terminé par Traefik ; Keycloak reçoit du HTTP sur le réseau interne.
+  # ---------------------------------------------------------------------------
+  keycloak:
+    <<: *securite
+    image: quay.io/keycloak/keycloak:26.7.4    # image officielle, utilisateur non-root (1000) par défaut
+    command: start --import-realm
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD}
+      KC_HOSTNAME: https://auth.${DOMAIN}
+      KC_HTTP_ENABLED: "true"           # HTTP uniquement derrière Traefik, sur le réseau interne
+      KC_PROXY_HEADERS: xforwarded      # fait confiance aux en-têtes X-Forwarded-* de Traefik
+      KC_HEALTH_ENABLED: "true"         # /health sur le port de gestion 9000, jamais routé
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+    volumes:
+      - ./keycloak/import:/opt/keycloak/data/import:ro   # realm déclaratif (Identity as Code)
+    networks:
+      - applicatif
+      - donnees
+    healthcheck:
+      # L'image ne contient pas curl : test HTTP minimal en bash pur
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200 OK' <&3"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 1G }
+    labels:
+      - traefik.enable=true
+      - traefik.http.services.keycloak.loadbalancer.server.port=8080
+      # Pages publiques : connexion des utilisateurs du realm cr465
+      - traefik.http.routers.keycloak.rule=Host(`auth.${DOMAIN}`)
+      - traefik.http.routers.keycloak.entrypoints=websecure
+      - traefik.http.routers.keycloak.tls=true
+      - traefik.http.routers.keycloak.service=keycloak
+      - traefik.http.routers.keycloak.middlewares=hsts@docker
+      # Console d'administration et realm master : IP d'administration uniquement
+      - traefik.http.routers.keycloak-admin.rule=Host(`auth.${DOMAIN}`) && (PathPrefix(`/admin`) || PathPrefix(`/realms/master`))
+      - traefik.http.routers.keycloak-admin.entrypoints=websecure
+      - traefik.http.routers.keycloak-admin.tls=true
+      - traefik.http.routers.keycloak-admin.service=keycloak
+      - traefik.http.routers.keycloak-admin.middlewares=admin-allowlist@docker,hsts@docker

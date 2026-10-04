@@ -1,0 +1,27 @@
+{
+  "realm": "cr465",
+  "displayName": "CR465 Formation",
+  "enabled": true,
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": false,
+  "rememberMe": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "passwordPolicy": "length(12) and notUsername and notEmail",
+  "internationalizationEnabled": true,
+  "supportedLocales": ["fr", "en"],
+  "defaultLocale": "fr",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "roles": {
+    "realm": [
+      { "name": "etudiant", "description": "Apprenant : acces aux cours achetes dans Moodle" },
+      { "name": "enseignant", "description": "Formateur : gestion des cours dans Moodle" }
+    ]
+  }
+}

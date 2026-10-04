@@ -11,6 +11,7 @@ Drupal Commerce, Moodle, Keycloak et n8n.
 | traefik | `traefik:v3.7.13` | Seul point d'entrée HTTP/HTTPS | exposition, applicatif, socket |
 | postgres | `postgres:17.10-alpine` | Base unique, une base par service | donnees |
 | portainer | `portainer/portainer-ce:2.39.5` (LTS) | Exploitation graphique des conteneurs | applicatif |
+| keycloak | `quay.io/keycloak/keycloak:26.7.4` | Fournisseur d'identité et SSO (OIDC) | applicatif, donnees |
 
 ## Segmentation réseau
 
@@ -37,12 +38,25 @@ par Traefik, Traefik → PostgreSQL, Traefik → socket Docker brut.
 - Secrets générés sur la VM (`scripts/gen-secrets.sh`), jamais commités.
 - Une base et un utilisateur PostgreSQL par service, `CONNECT` retiré à `PUBLIC`.
 
+## Keycloak
+
+- Realm `cr465` importé au démarrage depuis `keycloak/import/realm-cr465.json` (Identity as Code) :
+  inscription libre désactivée, protection anti-bruteforce (5 échecs), mots de passe de 12 caractères
+  minimum, rôles `etudiant` et `enseignant`.
+- Console d'administration (`/admin`) et realm `master` accessibles uniquement depuis les IP
+  d'administration ; les pages de connexion du realm `cr465` restent publiques.
+- Utilisateur non-root, TLS terminé par Traefik, endpoint de santé sur le port 9000 jamais routé.
+- Traefik porte les alias réseau `auth.cr465.test`, `moodle.cr465.test`, etc. : les conteneurs
+  joignent les URL publiques sans quitter le réseau interne (nécessaire pour le SSO Moodle).
+
 ## Risques résiduels assumés
 
 - **Portainer monte le socket Docker complet** : il en a besoin pour gérer les conteneurs.
   Compensation : accès uniquement via Traefik, IP autorisées, mot de passe fort.
 - **Certificat auto-signé par une CA locale** : il faut importer `ca.crt` sur le poste
   client pour éviter l'avertissement du navigateur.
+- **Keycloak sans système de fichiers en lecture seule** : il recompile sa configuration
+  au démarrage dans son propre dossier. Une image pré-construite (`kc.sh build`) le permettrait.
 - **Pas de healthcheck sur Portainer et socket-proxy** : leurs images ne contiennent pas
   d'outil de test (pas de shell ni de curl), ce qui réduit aussi leur surface d'attaque.
 
