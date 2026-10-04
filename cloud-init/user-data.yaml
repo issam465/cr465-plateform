@@ -1,0 +1,175 @@
+#cloud-config
+# =============================================================================
+# CR465 - VM as Code
+# Cible : Ubuntu Server 24.04 LTS (amd64)
+# Rôle  : préparer un hôte durci, prêt à exécuter la stack Docker Compose.
+#
+# Ce fichier ne contient AUCUN secret. Seule une clé SSH PUBLIQUE y figure.
+# Ne jamais y mettre de mot de passe, de clé privée ou de jeton.
+# =============================================================================
+
+hostname: cr465-vm
+timezone: America/Toronto
+
+# -----------------------------------------------------------------------------
+# 1. Utilisateur d'administration (connexion par clé SSH uniquement)
+# -----------------------------------------------------------------------------
+users:
+  - name: cr465admin
+    gecos: Administrateur plateforme CR465
+    shell: /bin/bash
+    groups: [sudo, adm]
+    sudo: "ALL=(ALL) NOPASSWD:ALL"   # pas de mot de passe sur le compte (lock_passwd)
+    lock_passwd: true                # aucun mot de passe : impossible de se connecter sans clé
+    ssh_authorized_keys:
+      # >>> REMPLACER par le contenu de votre fichier id_ed25519.pub <<<
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIO6DydCj/34NkRgxy9+5tqSnv52Mac3oWiFDKC2ma+Uq cr465admin
+
+disable_root: true
+ssh_pwauth: false
+
+# -----------------------------------------------------------------------------
+# 2. Mises à jour initiales et dépôts logiciels
+# -----------------------------------------------------------------------------
+package_update: true
+package_upgrade: true
+
+apt:
+  sources:
+    docker.list:
+      # Dépôt officiel Docker, clé vérifiée par son empreinte
+      source: "deb [arch=amd64 signed-by=$KEY_FILE] https://download.docker.com/linux/ubuntu $RELEASE stable"
+      keyid: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+
+packages:
+  # Outils de base
+  - ca-certificates
+  - curl
+  - gnupg
+  - git
+  - jq
+  - htop
+  # Sécurité de l'hôte
+  - ufw
+  - fail2ban
+  - unattended-upgrades
+  # Docker Engine + Compose (dépôt officiel)
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# -----------------------------------------------------------------------------
+# 3. Fichiers de configuration déclaratifs
+# -----------------------------------------------------------------------------
+write_files:
+  # --- Durcissement SSH ---
+  - path: /etc/ssh/sshd_config.d/99-cr465-hardening.conf
+    permissions: "0644"
+    content: |
+      PermitRootLogin no
+      PasswordAuthentication no
+      KbdInteractiveAuthentication no
+      PubkeyAuthentication yes
+      MaxAuthTries 3
+      LoginGraceTime 30
+      X11Forwarding no
+      AllowTcpForwarding yes
+      ClientAliveInterval 300
+      ClientAliveCountMax 2
+      AllowUsers cr465admin
+
+  # --- Démon Docker : journaux limités et privilèges réduits par défaut ---
+  - path: /etc/docker/daemon.json
+    permissions: "0644"
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "10m", "max-file": "3" },
+        "no-new-privileges": true,
+        "live-restore": true,
+        "userland-proxy": false,
+        "icc": false
+      }
+
+  # --- fail2ban : bannir les tentatives SSH répétées ---
+  - path: /etc/fail2ban/jail.d/sshd.local
+    permissions: "0644"
+    content: |
+      [sshd]
+      enabled  = true
+      backend  = systemd
+      maxretry = 5
+      findtime = 10m
+      bantime  = 1h
+
+  # --- Mises à jour de sécurité automatiques ---
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    permissions: "0644"
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+  # --- Durcissement réseau du noyau (compatible Docker) ---
+  - path: /etc/sysctl.d/99-cr465.conf
+    permissions: "0644"
+    content: |
+      net.ipv4.conf.all.rp_filter = 1
+      net.ipv4.conf.default.rp_filter = 1
+      net.ipv4.conf.all.accept_redirects = 0
+      net.ipv4.conf.default.accept_redirects = 0
+      net.ipv4.conf.all.send_redirects = 0
+      net.ipv4.conf.all.accept_source_route = 0
+      net.ipv4.tcp_syncookies = 1
+      kernel.kptr_restrict = 2
+      kernel.dmesg_restrict = 1
+
+  # --- Journalisation de base : journaux système persistants et plafonnés ---
+  - path: /etc/systemd/journald.conf.d/cr465.conf
+    permissions: "0644"
+    content: |
+      [Journal]
+      Storage=persistent
+      SystemMaxUse=500M
+
+# -----------------------------------------------------------------------------
+# 4. Commandes de préparation (exécutées une seule fois, au premier démarrage)
+# -----------------------------------------------------------------------------
+runcmd:
+  # Docker : démarrage et accès pour l'administrateur
+  - systemctl enable --now docker
+  - usermod -aG docker cr465admin
+
+  # Pare-feu hôte : tout refuser en entrée sauf SSH, HTTP, HTTPS
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw limit 22/tcp comment 'SSH (limite anti-bruteforce)'
+  - ufw allow 80/tcp comment 'HTTP vers Traefik'
+  - ufw allow 443/tcp comment 'HTTPS vers Traefik'
+  - ufw --force enable
+
+  # Services de sécurité et paramètres système
+  - systemctl enable --now fail2ban
+  - sysctl --system
+  - systemctl restart systemd-journald
+  - systemctl restart ssh
+
+  # Scanner d'images local (Trivy, dépôt officiel Aqua Security)
+  - curl -fsSL https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor -o /usr/share/keyrings/trivy.gpg
+  - echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb generic main" > /etc/apt/sources.list.d/trivy.list
+  - apt-get update && apt-get install -y trivy
+
+  # Répertoires de travail de la plateforme
+  - mkdir -p /opt/platform/repo /opt/platform/secrets /opt/platform/backups /opt/platform/scans
+  - chown -R cr465admin:cr465admin /opt/platform
+  - chmod 750 /opt/platform
+  - chmod 700 /opt/platform/secrets
+
+  # (Optionnel) Récupérer automatiquement le dépôt du projet
+  # - sudo -u cr465admin git clone https://github.com/issam465/cr465-plateform.git /opt/platform/repo
+
+  # Trace de fin d'initialisation (utile pour la démonstration)
+  - echo "cloud-init CR465 termine le $(date -Is) | $(docker --version) | $(docker compose version) | $(trivy --version | head -1)" > /var/log/cr465-init.log
+
+final_message: "CR465 : VM prête en $UPTIME secondes. Voir /var/log/cr465-init.log"
